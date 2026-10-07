@@ -1,0 +1,1 @@
+export const payStatus = (total, paid) => (paid >= total ? 'paid' : paid > 0 ? 'partial' : 'pending')

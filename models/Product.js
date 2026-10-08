@@ -12,7 +12,8 @@ const productSchema = new mongoose.Schema(
       color: { type: String, default: '', trim: true },
     },
     description: { type: String, default: '', trim: true, maxlength: 1000 },
-    image: { type: String, default: '' }, // path like /uploads/123.jpg
+    image: { type: String, default: '' }, // Cloudinary https link
+    imagePublicId: { type: String, default: '' }, // needed to delete the image later
   },
   { timestamps: true, versionKey: false }
 )

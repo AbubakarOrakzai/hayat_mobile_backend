@@ -1,25 +1,14 @@
-import fs from 'fs'
-import path from 'path'
-import crypto from 'crypto'
-import { fileURLToPath } from 'url'
 import multer from 'multer'
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url))
-export const UPLOAD_DIR = path.join(__dirname, '..', 'uploads')
-fs.mkdirSync(UPLOAD_DIR, { recursive: true })
+const ALLOWED = ['image/jpeg', 'image/png', 'image/webp']
 
-const EXT = { 'image/jpeg': '.jpg', 'image/png': '.png', 'image/webp': '.webp' }
-
-const storage = multer.diskStorage({
-  destination: (req, file, cb) => cb(null, UPLOAD_DIR),
-  filename: (req, file, cb) => cb(null, `${Date.now()}-${crypto.randomBytes(4).toString('hex')}${EXT[file.mimetype]}`),
-})
-
+// The file stays in memory and is sent straight to Cloudinary.
+// Nothing is written to the server's disk.
 export const upload = multer({
-  storage,
+  storage: multer.memoryStorage(),
   limits: { fileSize: 3 * 1024 * 1024, files: 1 },
   fileFilter: (req, file, cb) => {
-    if (EXT[file.mimetype]) return cb(null, true)
+    if (ALLOWED.includes(file.mimetype)) return cb(null, true)
     cb(Object.assign(new Error('Only JPG, PNG or WebP images are allowed.'), { status: 400 }))
   },
 })

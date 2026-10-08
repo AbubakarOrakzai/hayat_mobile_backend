@@ -1,18 +1,18 @@
-import fs from 'fs/promises'
-import path from 'path'
 import Product from '../models/Product.js'
 import Device from '../models/Device.js'
 import ApiError from '../utils/ApiError.js'
 import { asyncHandler } from '../utils/asyncHandler.js'
-import { UPLOAD_DIR } from '../middleware/upload.js'
+import { uploadImage, deleteImage } from '../utils/cloudinaryupload.js'
 
 /* ---------- helpers ---------- */
 
-const imageUrl = (req, image) => {
+// Cloudinary links get automatic format and quality, so photos load faster on phones.
+const imageUrl = (image) => {
   if (!image) return ''
-  if (/^(https?:|data:)/.test(image)) return image
-  const base = process.env.PUBLIC_URL || `${req.protocol}://${req.get('host')}`
-  return base + image
+  if (image.includes('res.cloudinary.com') && image.includes('/upload/')) {
+    return image.replace('/upload/', '/upload/f_auto,q_auto/')
+  }
+  return image
 }
 
 // Per product: how many devices exist, how many are in stock, lowest in-stock price.
@@ -30,7 +30,7 @@ async function stockMap() {
   return new Map(rows.map((r) => [String(r._id), r]))
 }
 
-const shape = (req, p, s, admin = false) => ({
+const shape = (p, s, admin = false) => ({
   _id: p._id,
   brand: p.brand,
   model: p.model,
@@ -38,16 +38,11 @@ const shape = (req, p, s, admin = false) => ({
   category: p.category,
   specs: p.specs,
   description: p.description,
-  image: imageUrl(req, p.image),
+  image: imageUrl(p.image),
   price: s?.price ?? 0,
   stock: s?.stock ?? 0,
   ...(admin ? { total: s?.total ?? 0 } : {}),
 })
-
-const removeFile = async (image) => {
-  if (!image || !image.startsWith('/uploads/')) return
-  try { await fs.unlink(path.join(UPLOAD_DIR, path.basename(image))) } catch { /* already gone */ }
-}
 
 function readBody(body) {
   let specs = body.specs
@@ -69,7 +64,7 @@ function readBody(body) {
 
 export const listPublic = asyncHandler(async (req, res) => {
   const [products, stats] = await Promise.all([Product.find().sort({ brand: 1, model: 1 }).lean(), stockMap()])
-  res.json(products.filter((p) => stats.get(String(p._id))?.total > 0).map((p) => shape(req, p, stats.get(String(p._id)))))
+  res.json(products.filter((p) => stats.get(String(p._id))?.total > 0).map((p) => shape(p, stats.get(String(p._id)))))
 })
 
 export const getPublic = asyncHandler(async (req, res) => {
@@ -77,54 +72,70 @@ export const getPublic = asyncHandler(async (req, res) => {
   const stats = await stockMap()
   const s = p && stats.get(String(p._id))
   if (!p || !s?.total) throw new ApiError(404, 'Product not found.')
-  res.json(shape(req, p, s))
+  res.json(shape(p, s))
 })
 
 /* ---------- admin ---------- */
 
 export const listAdmin = asyncHandler(async (req, res) => {
   const [products, stats] = await Promise.all([Product.find().sort({ brand: 1, model: 1 }).lean(), stockMap()])
-  res.json(products.map((p) => shape(req, p, stats.get(String(p._id)), true)))
+  res.json(products.map((p) => shape(p, stats.get(String(p._id)), true)))
 })
 
 export const getAdmin = asyncHandler(async (req, res) => {
   const p = await Product.findById(req.params.id).lean()
   if (!p) throw new ApiError(404, 'Product not found.')
   const stats = await stockMap()
-  res.json(shape(req, p, stats.get(String(p._id)), true))
+  res.json(shape(p, stats.get(String(p._id)), true))
 })
 
 export const create = asyncHandler(async (req, res) => {
-  const image = req.file ? `/uploads/${req.file.filename}` : ''
-  try {
-    const p = await Product.create({ ...readBody(req.body), image })
-    res.status(201).json(shape(req, p.toObject(), null, true))
-  } catch (err) {
-    await removeFile(image) // do not keep an upload for a product that failed to save
-    throw err
-  }
-})
+  const p = new Product(readBody(req.body))
+  await p.validate() // check the text fields before spending an upload
 
-export const update = asyncHandler(async (req, res) => {
-  const p = await Product.findById(req.params.id)
-  if (!p) {
-    if (req.file) await removeFile(`/uploads/${req.file.filename}`)
-    throw new ApiError(404, 'Product not found.')
+  if (req.file) {
+    const up = await uploadImage(req.file.buffer)
+    p.image = up.url
+    p.imagePublicId = up.publicId
   }
-  const oldImage = p.image
-  p.set(readBody(req.body))
-  if (req.file) p.image = `/uploads/${req.file.filename}`
-  else if (req.body.removeImage === 'true') p.image = ''
 
   try {
     await p.save()
   } catch (err) {
-    if (req.file) await removeFile(`/uploads/${req.file.filename}`)
+    await deleteImage(p.imagePublicId) // do not leave an orphan image in Cloudinary
     throw err
   }
-  if (p.image !== oldImage) await removeFile(oldImage)
+  res.status(201).json(shape(p.toObject(), null, true))
+})
+
+export const update = asyncHandler(async (req, res) => {
+  const p = await Product.findById(req.params.id)
+  if (!p) throw new ApiError(404, 'Product not found.')
+
+  const oldPublicId = p.imagePublicId
+  p.set(readBody(req.body))
+  await p.validate()
+
+  let uploaded = null
+  if (req.file) {
+    uploaded = await uploadImage(req.file.buffer)
+    p.image = uploaded.url
+    p.imagePublicId = uploaded.publicId
+  } else if (req.body.removeImage === 'true') {
+    p.image = ''
+    p.imagePublicId = ''
+  }
+
+  try {
+    await p.save()
+  } catch (err) {
+    if (uploaded) await deleteImage(uploaded.publicId)
+    throw err
+  }
+
+  if (oldPublicId && oldPublicId !== p.imagePublicId) await deleteImage(oldPublicId)
   const stats = await stockMap()
-  res.json(shape(req, p.toObject(), stats.get(String(p._id)), true))
+  res.json(shape(p.toObject(), stats.get(String(p._id)), true))
 })
 
 export const remove = asyncHandler(async (req, res) => {
@@ -134,6 +145,6 @@ export const remove = asyncHandler(async (req, res) => {
     throw new ApiError(409, 'This product has devices in the system, so it cannot be deleted.')
   }
   await p.deleteOne()
-  await removeFile(p.image)
+  await deleteImage(p.imagePublicId)
   res.json({ ok: true })
 })

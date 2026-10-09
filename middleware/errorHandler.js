@@ -27,5 +27,9 @@ export function errorHandler(err, req, res, next) {
   }
 
   if (status >= 500) console.error(err)
-  res.status(status).json({ message: status >= 500 ? 'Something went wrong on the server.' : message })
+  // ApiError messages are written by us for the user, e.g. "Authentication is not
+  // configured on the server.", so they are safe to show. Other crashes could leak
+  // internal details, so those get a general message.
+  const hide = status >= 500 && !(err instanceof ApiError)
+  res.status(status).json({ message: hide ? 'Something went wrong on the server.' : message })
 }
